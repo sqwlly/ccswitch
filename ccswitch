@@ -89,9 +89,9 @@ confirm() {
     [[ "$response" =~ ^[Yy]$ ]]
 }
 
-# 交互式菜单选择 - 支持上下键导航
+# 交互式菜单选择 - 使用数字选择（简单可靠）
 # 用法: select_from_list "标题" "选项1|选项2|..." [初始索引]
-# 返回: 选中的索引 (从1开始), 空字符串表示取消
+# 返回: 选中的索引 (从1开始), 255表示取消
 select_from_list() {
     local title="$1"
     local options="$2"
@@ -100,63 +100,43 @@ select_from_list() {
     # 将选项转为数组
     IFS='|' read -ra OPT_ARRAY <<< "$options"
     local count=${#OPT_ARRAY[@]}
-    [ $count -eq 0 ] && return 1
-
-    local selected=$((initial_idx - 1))
-    local tty="/dev/tty"
-
-    # 确保 tty 可用
-    [ ! -t 0 ] && [ ! -t 1 ] && return 1
+    [ $count -eq 0 ] && return 255
 
     while true; do
-        # 清屏并显示标题
         clear
         show_header
         echo -e "${BOLD}[模式：$title]${NC}\n"
-        echo -e "${CYAN}使用 ↑↓ 选择，回车确认，ESC/q 取消${NC}\n"
 
-        # 显示选项（不使用 REVERSE，避免浅色背景问题）
+        # 显示选项（使用数字）
         for i in "${!OPT_ARRAY[@]}"; do
-            if [ $i -eq $selected ]; then
-                printf "  ${BOLD}${GREEN}▶${NC} ${BOLD}${GREEN}%s${NC}\n" "${OPT_ARRAY[$i]}"
+            local num=$((i + 1))
+            if [ $num -eq $initial_idx ]; then
+                printf "  ${GREEN}%d.${NC} ${BOLD}%s${NC} ${YELLOW}(当前)${NC}\n" "$num" "${OPT_ARRAY[$i]}"
             else
-                printf "    %s\n" "${OPT_ARRAY[$i]}"
+                printf "  ${GREEN}%d.${NC} %s\n" "$num" "${OPT_ARRAY[$i]}"
             fi
         done
 
-        # 读取单字符
-        local key
-        IFS= read -rsn1 key < "$tty" 2>/dev/null || break
+        echo
+        echo -e "${CYAN}输入选项编号确认，q 取消${NC}"
+        echo -e "${BLUE}─────────────────────────────────────────────────────────────────${NC}"
 
-        # 处理特殊键
-        case "$key" in
-            $'\x1b')  # ESC 序列
-                read -rsn2 -t 0.1 key < "$tty" 2>/dev/null || key=""
-                case "$key" in
-                    '[A') # 上箭头
-                        ((selected > 0)) && ((selected--))
-                        ;;
-                    '[B') # 下箭头
-                        ((selected < count - 1)) && ((selected++))
-                        ;;
-                    '')  # 单独 ESC - 取消
-                        echo ""
-                        return 1
-                        ;;
-                esac
-                ;;
-            $'\x0a'|$'\x0d')  # 回车 - 确认
-                echo ""
-                return $((selected + 1))
-                ;;
-            q|Q)  # q 取消
-                echo ""
-                return 1
-                ;;
-        esac
+        local choice
+        choice=$(read_input "请选择" "$initial_idx")
+
+        # 处理取消
+        if [[ "$choice" =~ ^[qQ]$ ]]; then
+            return 255
+        fi
+
+        # 验证输入是数字且在范围内
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
+            return "$choice"
+        else
+            echo -e "${RED}✗ 无效选择，请输入 1-$count${NC}"
+            sleep 1
+        fi
     done
-
-    return 1
 }
 
 # 获取供应商列表（用于交互式选择）
@@ -320,8 +300,9 @@ edit_provider() {
     done <<< "$providers"
 
     # 交互式选择
-    select_from_list "编辑供应商" "$options" || return
+    select_from_list "编辑供应商" "$options"
     local idx=$?
+    [ $idx -eq 255 ] && return
     local choice="${id_array[$((idx-1))]}"
 
     # 获取当前供应商配置
@@ -392,8 +373,9 @@ delete_provider() {
     done <<< "$providers"
 
     # 交互式选择
-    select_from_list "删除供应商" "$options" || return
+    select_from_list "删除供应商" "$options"
     local idx=$?
+    [ $idx -eq 255 ] && return
     local choice="${id_array[$((idx-1))]}"
 
     # 二次确认
@@ -426,8 +408,9 @@ toggle_provider() {
     done <<< "$providers"
 
     # 交互式选择
-    select_from_list "启用/禁用供应商" "$options" || return
+    select_from_list "启用/禁用供应商" "$options"
     local idx=$?
+    [ $idx -eq 255 ] && return
     local choice="${id_array[$((idx-1))]}"
 
     python3 - "$PROVIDERS_FILE" "$choice" << 'PYSCRIPT'
@@ -462,8 +445,9 @@ switch_primary_menu() {
     done <<< "$providers_data"
 
     # 交互式选择
-    select_from_list "切换主供应商" "$options" "$initial_idx" || return
+    select_from_list "切换主供应商" "$options" "$initial_idx"
     local idx=$?
+    [ $idx -eq 255 ] && return
     local selected_id="${id_array[$((idx-1))]}"
 
     apply_provider "$selected_id"
@@ -493,18 +477,34 @@ PYSCRIPT
 import json, sys
 with open('${CONFIG_FILE}', 'r') as f: config = json.load(f)
 if 'env' not in config: config['env'] = {}
+
+# 删除旧的 API_KEY 避免冲突
+if 'ANTHROPIC_API_KEY' in config['env']:
+    del config['env']['ANTHROPIC_API_KEY']
+
+# 设置新的供应商配置
 config['env']['ANTHROPIC_BASE_URL'] = '${url}'
-if '${token}': config['env']['ANTHROPIC_AUTH_TOKEN'] = '${token}'
-elif 'ANTHROPIC_AUTH_TOKEN' in config['env']: del config['env']['ANTHROPIC_AUTH_TOKEN']
+if '${token}':
+    config['env']['ANTHROPIC_AUTH_TOKEN'] = '${token}'
+elif 'ANTHROPIC_AUTH_TOKEN' in config['env']:
+    del config['env']['ANTHROPIC_AUTH_TOKEN']
+
 config['env']['ANTHROPIC_MODEL'] = '${model}'
+
+# GLM 特殊模型映射
 if 'bigmodel.cn' in '${url}':
     config['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] = 'glm-4.7'
     config['env']['ANTHROPIC_DEFAULT_SONNET_MODEL'] = 'glm-4.7'
     config['env']['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = 'glm-4.5-air'
 else:
+    # 清除 GLM 模型配置
     for k in ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL']:
-        if k in config['env']: del config['env'][k]
+        if k in config['env']:
+            del config['env'][k]
+
 with open('${CONFIG_FILE}', 'w') as f: json.dump(config, f, indent=2)
+
+# 更新活跃供应商
 with open('${PROVIDERS_FILE}', 'r') as f: data = json.load(f)
 data['active_provider'] = '${provider_id}'
 with open('${PROVIDERS_FILE}', 'w') as f: json.dump(data, f, indent=2)
@@ -568,8 +568,9 @@ set_fallback_provider() {
     done <<< "$providers"
 
     # 交互式选择
-    select_from_list "设置备用供应商" "$options" || return
+    select_from_list "设置备用供应商" "$options"
     local idx=$?
+    [ $idx -eq 255 ] && return
     local choice="${id_array[$((idx-1))]}"
 
     python3 - "$PROVIDERS_FILE" "$choice" << 'PYSCRIPT'
@@ -724,3 +725,4 @@ main() {
 }
 
 main "$@"
+
